@@ -420,8 +420,10 @@ export function freshState(): State {
 /** The configured ping period (minutes, 1 to 59) and window (hours, over 0 up to 168), each falling back to its default when missing, not a number or out of range. */
 export function configFrom(options: unknown): { period: number; window: number } {
   const o = (options ?? {}) as Record<string, unknown>
-  const min = o.pingPeriodMinutes
-  const hours = o.windowHours
+  // The settings store and `claude plugin configure --values-stdin` hand values over as strings.
+  const num = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? Number(v) : v)
+  const min = num(o.pingPeriodMinutes)
+  const hours = num(o.windowHours)
   return {
     period: typeof min === 'number' && Number.isFinite(min) && min >= 1 && min <= 59 ? Math.round(min * 60_000) : PING_AFTER_MS,
     window: typeof hours === 'number' && Number.isFinite(hours) && hours > 0 && hours <= 168 ? Math.round(hours * 3_600_000) : DEFAULT_WINDOW_MS,

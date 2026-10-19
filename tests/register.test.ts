@@ -1991,5 +1991,7 @@ describe('configured period and window', () => {
     }
     expect(configFrom({ pingPeriodMinutes: 30, windowHours: 12 })).toEqual({ period: 30 * MIN, window: 12 * HOUR })
     expect(configFrom({ pingPeriodMinutes: 59, windowHours: 168 })).toEqual({ period: 59 * MIN, window: 168 * HOUR })
+    expect(configFrom({ pingPeriodMinutes: '55', windowHours: '24' })).toEqual({ period: 55 * MIN, window: 24 * HOUR })
+    expect(configFrom({ pingPeriodMinutes: '', windowHours: ' ' })).toEqual(defaults)
   })
 })
