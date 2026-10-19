@@ -26,7 +26,7 @@ claude plugin install cache-tax@claude-code-mods
 
 Restart Claude Code or run `/reload-plugins` in an open session. No early-access flag is needed. If you set `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` previously, remove it; current Claude Code ignores it.
 
-In a warm session, run `/keepwarm` to arm six hours. Use `/keepwarm 90m` for a shorter window, or `/keepwarm off` to stop.
+In a warm session, `always` is on by default, so every session arms 24 hours at start with nothing typed. Run `/keepwarm` to re-arm 24 hours. Use `/keepwarm 90m` for a shorter window, or `/keepwarm off` to stop and turn always off for good.
 
 **Check the main cache lifetime.** Included subscription usage defaults to one hour. API-key, usage-credit and cloud-provider sessions default to five minutes, so set [`promptCacheTtl`](https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself) to `"1h"` for those billing paths. A 50-minute timer cannot protect a five-minute main cache. See [Limits](#limits) for the fork evidence.
 
@@ -38,7 +38,7 @@ In a warm session, run `/keepwarm` to arm six hours. Use `/keepwarm 90m` for a s
 
 **When you return cold:** for a context of at least 50,000 tokens, the guard drops your ordinary message once when its one-hour clock says cold. It shows the estimated rewrite price. Resend to continue, or `/clear` and start from a note. A prompt no person sent, such as a background task's notification, a scheduled prompt or another session's message, is sent with the price logged, because nobody is there to resend it. Anything a person may have sent keeps the guard, including Remote Control, Slack and channel messages, SDK hosts and prompts Claude Code cannot classify.
 
-A detected cold write automatically arms at least three hours of keepwarm, six with `always` on, and prints what it cost. `/cache-tax` shows the current cache estimate, warming window and this session's cold-write tally.
+A detected cold write automatically arms at least three hours of keepwarm, 24 with `always` on (the default), and prints what it cost. `/cache-tax` shows the current cache estimate, warming window and this session's cold-write tally.
 
 Windows belong to individual sessions. An already-cold session waits for your next turn before pinging, and so does a window restored after Claude Code restarts, until the new process has a turn to fork. A ping refused by a busy API (429, 529, 5xx) is retried after 1, 2 and 4 minutes while it can still land before the cache goes cold. With `always` on, each of your turns that reaches the cache leaves at least six hours of window at the default period, so any break up to six hours stays warm however long the session runs. The same turn brings back a window that stopped, stretches a shorter one to six hours and resets a testing period; a longer window you set stays. `/keepwarm off` in any session stops every session rolling from its next turn. A window ends at its deadline; `/keepwarm off` also cancels it and clears the always setting.
 
@@ -58,12 +58,12 @@ New to caching? [Anthropic explains how Claude Code uses it](https://code.claude
 
 ## Commands
 
-    /keepwarm               keep warm for six hours
+    /keepwarm               keep warm for 24 hours
     /keepwarm 90m           keep warm for a window of your own (also 2h30m, 6h)
-    /keepwarm always        keep every session warm until six hours after its last turn, remembered across sessions
+    /keepwarm always        keep every session warm until 24 hours after its last turn; on by default, so this re-enables it after an off
     /keepwarm 6h every 2m   pinging every two minutes; a testing knob, 1m to 59m, forgotten after this window (with always on, at your next turn)
     /keepwarm status        the warming window, next ping and last receipt
-    /keepwarm off           stop, forget the window, and turn always off
+    /keepwarm off           stop, forget the window, and turn always off for good (new sessions stay unarmed until /keepwarm always)
     /cache-tax              the card
     /cache-tax guard warn   show the price and send (the hook's default)
     /cache-tax guard refuse drop a cold send once, the resend goes through (this mod's default)
@@ -144,7 +144,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [137 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [140 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Guard:** refuse once and resend, warn mode, slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
 - **Warming:** command defaults and refused windows and periods, always/off, always after `/clear`, always rolling from the last turn, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.

@@ -6,13 +6,18 @@ const PING_AFTER_MS = 50 * 60 * 1000
 const MIN_PING_MS = 60 * 1000
 const MAX_RETRIES = 3
 const AUTO_WARM_MS = 3 * 60 * 60 * 1000
-const DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1000
+const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000
 const BIG_TOKENS = 50000
 const PING_PROMPT = 'Reply with the single word: warm'
 const KEY_DEADLINE = 'deadline'
 const KEY_EVERY = 'every'
 const KEY_GUARD = 'guard'
 const KEY_ALWAYS = 'always'
+
+/** Always is on unless a /keepwarm off stored an explicit false: new sessions arm with nothing typed. */
+function alwaysOn(v: unknown): boolean {
+  return v !== false
+}
 
 // Prompts no person sent, so nobody could send them again after a refusal. Every
 // other origin, including sdk, unclassified and the owner's own Slack or channel
@@ -248,7 +253,8 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
   disarm(s)
   await $.store.delete(deadlineKey(s))
   await $.store.delete(everyKey(s))
-  if (forgetAlways) await $.store.delete(KEY_ALWAYS)
+  // Always defaults on, so off is an explicit false, never a missing key.
+  if (forgetAlways) await $.store.set(KEY_ALWAYS, false)
   updateStatus($, s, await $.clock.now())
 }
 
@@ -391,7 +397,7 @@ function card(s: State, now: number): string {
   lines.push(`context     ${s.ctx.toLocaleString('en-US')} tokens`)
   lines.push(`cold cost   ${fmtUsd(coldUsd(s))} to re-write it (warm turn ${fmtUsd(warmUsd(s))})`)
   const always = s.always ? ' (always)' : ''
-  const idle = s.always ? 'off until the next turn, which arms 6h00m (always)' : 'off (/keepwarm to arm it for 6h00m)'
+  const idle = s.always ? `off until the next turn, which arms ${fmtDuration(DEFAULT_WINDOW_MS)} (always)` : `off (/keepwarm to arm it for ${fmtDuration(DEFAULT_WINDOW_MS)})`
   lines.push(`keepwarm    ${s.deadline ? (statusText(s, now) ?? '').replace(/^keepwarm /, 'on, ') + always : s.stopped ? `stopped, ${s.stopped}${always}` : idle}`)
   const pings = breakEvenPings(s)
   if (pings != null) lines.push(`break-even  up to ${pings} pings at the read rate cost one cold write, about ${fmtDuration(pings * s.every)} of idle at one ping per ${fmtDuration(s.every)}`)
@@ -468,15 +474,15 @@ export const register: Register = on => {
     s.deadline = typeof saved === 'number' && saved > now ? saved : 0
     s.every = typeof savedEvery === 'number' && savedEvery >= MIN_PING_MS && savedEvery < TTL_MS ? savedEvery : PING_AFTER_MS
     s.guard = savedGuard === 'warn' ? 'warn' : 'refuse'
-    s.always = (await $.store.get(KEY_ALWAYS)) === true
+    s.always = alwaysOn(await $.store.get(KEY_ALWAYS))
     // Always means a fresh default window every session, whatever the last one left behind.
     if (s.always) await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
     const usage = await $.session.usage()
     if (usage.context.tokens) s.ctx = usage.context.tokens
     await $.command.register({
       name: 'keepwarm',
-      description: 'Keep the prompt cache warm: bare for 6h, a window such as 90m, always, off, or status (cache-tax)',
-      argumentHint: '[6h | always | off | status]',
+      description: 'Keep the prompt cache warm: bare for 24h, a window such as 90m, always, off, or status (cache-tax)',
+      argumentHint: '[24h | always | off | status]',
       immediate: true,
     })
     await $.command.register({
@@ -624,12 +630,12 @@ export const register: Register = on => {
     s.compacted = false
     s.waitForTurn = false
     s.ackedAt = 0
-    // Always covers any break up to six hours after a turn that reached the cache (a turn that failed before any
-    // response touched nothing, and its cache may be cold): a window of at least six hours at the default period,
+    // Always covers any break up to 24 hours after a turn that reached the cache (a turn that failed before any
+    // response touched nothing, and its cache may be cold): a window of at least 24 hours at the default period,
     // which brings back a stopped window and replaces a shorter one or a testing period. Another session's
     // /keepwarm off or /keepwarm always changes the shared switch, so every such turn reads it.
     if (e.usage) {
-      const shared = (await $.store.get(KEY_ALWAYS)) === true
+      const shared = alwaysOn(await $.store.get(KEY_ALWAYS))
       if (s.offs === offs) s.always = shared
       if (s.always) await startWindow($, s, Math.max(DEFAULT_WINDOW_MS, s.deadline - now), PING_AFTER_MS, offs)
     }
