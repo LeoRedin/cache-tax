@@ -3,7 +3,7 @@ import type { TestBody } from 'claude-code/testing'
 import type { CommandRunInput, ConfigSetInput, ModelForkResult, On, PromptSubmitInput, RenderPropsOf, SessionStartInput, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 import { statusIcons } from '../hooks/status-icons'
-import { fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
+import { configFrom, fmtDuration, freshState, parseDuration, resetForClear, seedFromResume } from '../hooks/register'
 
 tier('user')
 
@@ -73,6 +73,7 @@ function world(on: On, forkAnswers: ForkAnswer[], opts: { defaultAlways?: boolea
   on('prompt.submit', ($, e) => { entered.push(e.text); return { text: e.text } })
   on('session.compact', ($, e) => ({ messages: e.messages }))
   on('classic.SessionStart', () => ({}))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('ui.log', ($, e) => { logs.push(e.text); return { value: undefined } })
   on('ui.status', ($, e) => { status.push(e.text); return { value: undefined } })
   on('ui.render', ($, e) => $.ui.resolve(e).Text({ children: [opts.bandText ?? ''] }))
@@ -1889,5 +1890,106 @@ describe('/keepwarm off while a turn is running', () => {
     for await (const c of $.turn.step({ turnId: 'comeback', index: 0, model: 'claude-fable-5-1', messageCount: 3 })) void c
     await $.turn.complete(turn({ usage: usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 200000 }) }))
     expect(store.get('deadline:S1')).toBe(START + 2 * HOUR + 3 * HOUR)
+  })
+})
+
+const ending = (reason: 'prompt_input_exit' | 'clear' | 'resume' | 'logout' | 'other', sessionId = 'S1') => ({ reason, sessionId, resume: { id: sessionId } })
+
+describe('session.end', () => {
+  test('deletes only this session\'s window and ping period and never pings again', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['deadline:other', START + HOUR], ['every:other', 2 * MIN], ['guard', 'warn'], ['always', true]])
+    const w = world(on, [warm], { store })
+    await $.session.start(session)
+    await $.command.run(run('keepwarm', '6h every 30m'))
+    await $.turn.complete(turn())
+    expect(store.has('deadline:S1')).toBe(true)
+    await $.session.end(ending('prompt_input_exit'))
+    expect([...store.keys()].sort()).toEqual(['always', 'deadline:other', 'every:other', 'guard'])
+    expect(store.get('always')).toBe(true)
+    await clock.advance(3 * HOUR)
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('a timer pending at end never forks, and a ping in flight is outdated', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm], { defaultAlways: true })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(49 * MIN)
+    await $.session.end(ending('other'))
+    await clock.advance(10 * MIN)
+    expect(w.forks.length).toBe(0)
+  })
+
+  test('always arms the new conversation after a clear that ends the old one first', async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['always', true]])
+    let sid = 'S1'
+    const w = world(on, [warm], { store, sid: () => sid })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await $.session.end(ending('clear', 'S1'))
+    expect(store.has('deadline:S1')).toBe(false)
+    sid = 'S2'
+    await $.classic.SessionStart({ source: 'clear' })
+    expect(store.get('deadline:S2')).toBe(START + 24 * HOUR)
+    await $.turn.complete(turn())
+    await clock.advance(50 * MIN)
+    expect(w.forks.length).toBe(1)
+  })
+
+  test('a resumed session re-arms through always', async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['always', true]])
+    world(on, [], { store })
+    await $.session.start(session)
+    await $.session.end(ending('prompt_input_exit'))
+    expect(store.has('deadline:S1')).toBe(false)
+    await $.session.start(session)
+    expect(store.get('deadline:S1')).toBe(START + 24 * HOUR)
+  })
+})
+
+describe('configured period and window', () => {
+  test('a 30 minute period pings at 30 minutes', { options: { pingPeriodMinutes: 30 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: START })
+    const w = world(on, [warm], { defaultAlways: true })
+    await $.session.start(session)
+    await $.turn.complete(turn())
+    await clock.advance(29 * MIN)
+    expect(w.forks.length).toBe(0)
+    await clock.advance(1 * MIN)
+    expect(w.forks.length).toBe(1)
+  })
+
+  test('a 12 hour window is armed at session start and rolled forward by a turn', { options: { windowHours: 12 } }, async ($, on) => {
+    mock.clock(on, { now: START })
+    const store = new Map<string, unknown>([['always', true]])
+    world(on, [warm], { store })
+    await $.session.start(session)
+    expect(store.get('deadline:S1')).toBe(START + 12 * HOUR)
+    expect(store.has('every:S1')).toBe(false)
+    await $.turn.complete(turn())
+    expect(store.get('deadline:S1')).toBe(START + 12 * HOUR)
+  })
+
+  test('status and the card print the configured values', { options: { windowHours: 12, pingPeriodMinutes: 30 } }, async ($, on) => {
+    mock.clock(on, { now: START })
+    world(on, [])
+    await $.session.start(session)
+    expect((await $.command.run(run('keepwarm', ''))).text).toContain('keepwarm on for 12h00m, a ping 30m after each idle')
+    await $.command.run(run('keepwarm', 'off'))
+    expect((await $.command.run(run('cache-tax', ''))).text).toContain('arm it for 12h00m')
+  })
+
+  // The loader already rejects values outside the manifest's min and max, so these reach the mod only when a host skips that check.
+  test('values outside the allowed range or not numbers fall back to 50m and 24h', () => {
+    const defaults = { period: 50 * MIN, window: 24 * HOUR }
+    for (const bad of [{ pingPeriodMinutes: 0, windowHours: 0 }, { pingPeriodMinutes: 60, windowHours: 169 }, { pingPeriodMinutes: 'x', windowHours: 'y' }, { pingPeriodMinutes: NaN, windowHours: -1 }, {}, undefined]) {
+      expect(configFrom(bad)).toEqual(defaults)
+    }
+    expect(configFrom({ pingPeriodMinutes: 30, windowHours: 12 })).toEqual({ period: 30 * MIN, window: 12 * HOUR })
+    expect(configFrom({ pingPeriodMinutes: 59, windowHours: 168 })).toEqual({ period: 59 * MIN, window: 168 * HOUR })
   })
 })

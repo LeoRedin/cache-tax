@@ -1,9 +1,27 @@
 {
   "name": "cache-tax",
-  "version": "2.3.0",
+  "version": "2.3.0-leo.2",
   "description": "A Claude Code mod that keeps the one-hour prompt cache warm during breaks and stops a cold send once with its estimated rewrite cost. Warming uses model requests and costs tokens. Requires Claude Code 2.1.287+.",
   "author": {
     "name": "Karan Bansal"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "pingPeriodMinutes": {
+      "type": "number",
+      "title": "Ping period (minutes)",
+      "description": "Minutes between keep-warm pings, 1 to 59. The cache lives one hour, so keep it under that.",
+      "default": 50,
+      "min": 1,
+      "max": 59
+    },
+    "windowHours": {
+      "type": "number",
+      "title": "Window (hours)",
+      "description": "Default keep-warm window in hours, up to 168. With always on, each turn rolls the window forward to this long.",
+      "default": 24,
+      "min": 0.1,
+      "max": 168
+    }
+  }
 }

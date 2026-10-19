@@ -82,6 +82,17 @@ The cube follows Claude's light or dark theme. Its terminal image also has a con
 
 The mod reads the theme and `NO_COLOR` once when the session starts. Accepted theme changes update the icon immediately; ordinary redraws do not reread either setting. Set `NO_COLOR` before starting the session.
 
+## Configure
+
+Two global options set the defaults. Run `claude plugin configure cache-tax` to see them and which are unset, or save values with `claude plugin configure cache-tax --values-stdin`.
+
+- `pingPeriodMinutes` (default 50, 1 to 59): minutes between pings. Out of range or not a number falls back to 50.
+- `windowHours` (default 24, up to 168): the window `/keepwarm` and `always` arm, and the length a turn rolls it forward to. Invalid falls back to 24.
+
+`/keepwarm <window> every <period>` still overrides both for one window. The card and status print the configured values. Changing an option reloads the mod.
+
+**Session end.** When a session exits, is archived or its process stops (`session.end`), cache-tax disarms its timer, drops any ping in flight and deletes that session's own window and period keys. It never pings again. Other sessions' keys and the `always` and `guard` switches are untouched. A resumed session re-arms through `always`, and `/clear` re-arms the new conversation the same way.
+
 ## Both forms installed
 
 The hook and the mod share a name and a job, so having both means two guards on every cold send. The mod checks at session start whether the hook's `/cache-tax:status` command exists and says so once. Keep one guard. The hook remains an option for people who prefer settings hooks. Before uninstalling it, check your status line: the 🧊 row wired to `cache-tax.js` comes from the hook's files. This mod draws above the prompt while keepwarm is armed; it does not replace your shell status line.
@@ -144,7 +155,7 @@ claude plugin validate .claude-plugin/plugin.json
 claude plugin test .
 ```
 
-The [140 tests](tests/register.test.ts) use a mock clock and engine. They cover:
+The [148 tests](tests/register.test.ts) use a mock clock and engine. They cover:
 
 - **Guard:** refuse once and resend, warn mode, slash commands, small contexts, prompts nobody typed, resume seeding and cold-write scoring.
 - **Warming:** command defaults and refused windows and periods, always/off, always after `/clear`, always rolling from the last turn, idle resets, usage-based stopping, cold-window expiry and delayed timers after sleep.
