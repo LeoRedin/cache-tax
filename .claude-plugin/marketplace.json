@@ -1,0 +1,13 @@
+{
+  "name": "leo-cache-tax",
+  "owner": {
+    "name": "Leo"
+  },
+  "plugins": [
+    {
+      "name": "cache-tax",
+      "source": "./",
+      "description": "Fork of karanb192/cache-tax: keepwarm always on by default with a 24h window; /keepwarm off turns it off for good."
+    }
+  ]
+}

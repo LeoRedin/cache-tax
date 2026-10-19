@@ -6,13 +6,18 @@ const PING_AFTER_MS = 50 * 60 * 1000
 const MIN_PING_MS = 60 * 1000
 const MAX_RETRIES = 3
 const AUTO_WARM_MS = 3 * 60 * 60 * 1000
-const DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1000
+const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000
 const BIG_TOKENS = 50000
 const PING_PROMPT = 'Reply with the single word: warm'
 const KEY_DEADLINE = 'deadline'
 const KEY_EVERY = 'every'
 const KEY_GUARD = 'guard'
 const KEY_ALWAYS = 'always'
+
+/** Always is on unless a /keepwarm off stored an explicit false: new sessions arm with nothing typed. */
+function alwaysOn(v: unknown): boolean {
+  return v !== false
+}
 
 // Prompts no person sent, so nobody could send them again after a refusal. Every
 // other origin, including sdk, unclassified and the owner's own Slack or channel
@@ -56,6 +61,8 @@ export type State = {
   sid: string
   deadline: number
   every: number
+  period: number
+  window: number
   always: boolean
   lastRequestAt: number
   lastModel: string | null
@@ -241,14 +248,15 @@ async function stop($: EngineInterface, s: State, why: string | null, forgetAlwa
     s.offs++
   }
   s.deadline = 0
-  s.every = PING_AFTER_MS
+  s.every = s.period
   s.stopped = why
   s.retries = 0
   outdate(s)
   disarm(s)
   await $.store.delete(deadlineKey(s))
   await $.store.delete(everyKey(s))
-  if (forgetAlways) await $.store.delete(KEY_ALWAYS)
+  // Always defaults on, so off is an explicit false, never a missing key.
+  if (forgetAlways) await $.store.set(KEY_ALWAYS, false)
   updateStatus($, s, await $.clock.now())
 }
 
@@ -349,7 +357,7 @@ function afterRetries(n: number): string {
 /** The reply to an arming command; on a cold cache it says when the first ping can come. */
 /** How long keepwarm holds the cache after a paid cold write: the rolling window when always is on. */
 function holdMs(s: State): number {
-  return s.always ? DEFAULT_WINDOW_MS : AUTO_WARM_MS
+  return s.always ? s.window : AUTO_WARM_MS
 }
 
 function armedText(s: State, now: number, windowMs: number): string {
@@ -367,7 +375,7 @@ async function startWindow($: EngineInterface, s: State, windowMs: number, every
   s.every = every
   s.deadline = deadline
   s.stopped = null
-  if (every === PING_AFTER_MS) await $.store.delete(everyKey(s))
+  if (every === s.period) await $.store.delete(everyKey(s))
   else await $.store.set(everyKey(s), every)
   await $.store.set(deadlineKey(s), deadline)
   if (s.offs !== offs) {
@@ -391,7 +399,7 @@ function card(s: State, now: number): string {
   lines.push(`context     ${s.ctx.toLocaleString('en-US')} tokens`)
   lines.push(`cold cost   ${fmtUsd(coldUsd(s))} to re-write it (warm turn ${fmtUsd(warmUsd(s))})`)
   const always = s.always ? ' (always)' : ''
-  const idle = s.always ? 'off until the next turn, which arms 6h00m (always)' : 'off (/keepwarm to arm it for 6h00m)'
+  const idle = s.always ? `off until the next turn, which arms ${fmtDuration(s.window)} (always)` : `off (/keepwarm to arm it for ${fmtDuration(s.window)})`
   lines.push(`keepwarm    ${s.deadline ? (statusText(s, now) ?? '').replace(/^keepwarm /, 'on, ') + always : s.stopped ? `stopped, ${s.stopped}${always}` : idle}`)
   const pings = breakEvenPings(s)
   if (pings != null) lines.push(`break-even  up to ${pings} pings at the read rate cost one cold write, about ${fmtDuration(pings * s.every)} of idle at one ping per ${fmtDuration(s.every)}`)
@@ -403,14 +411,31 @@ function card(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
+    hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, period: PING_AFTER_MS, window: DEFAULT_WINDOW_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null,
   }
 }
 
-export const register: Register = on => {
+/** The configured ping period (minutes, 1 to 59) and window (hours, over 0 up to 168), each falling back to its default when missing, not a number or out of range. */
+export function configFrom(options: unknown): { period: number; window: number } {
+  const o = (options ?? {}) as Record<string, unknown>
+  // The settings store and `claude plugin configure --values-stdin` hand values over as strings.
+  const num = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? Number(v) : v)
+  const min = num(o.pingPeriodMinutes)
+  const hours = num(o.windowHours)
+  return {
+    period: typeof min === 'number' && Number.isFinite(min) && min >= 1 && min <= 59 ? Math.round(min * 60_000) : PING_AFTER_MS,
+    window: typeof hours === 'number' && Number.isFinite(hours) && hours > 0 && hours <= 168 ? Math.round(hours * 3_600_000) : DEFAULT_WINDOW_MS,
+  }
+}
+
+export const register: Register = (on, options) => {
   const s = freshState()
+  const cfg = configFrom(options)
+  s.period = cfg.period
+  s.every = cfg.period
+  s.window = cfg.window
   let light = false
   let noColor = false
 
@@ -466,17 +491,17 @@ export const register: Register = on => {
     const savedEvery = await $.store.get(everyKey(s))
     const savedGuard = await $.store.get(KEY_GUARD)
     s.deadline = typeof saved === 'number' && saved > now ? saved : 0
-    s.every = typeof savedEvery === 'number' && savedEvery >= MIN_PING_MS && savedEvery < TTL_MS ? savedEvery : PING_AFTER_MS
+    s.every = typeof savedEvery === 'number' && savedEvery >= MIN_PING_MS && savedEvery < TTL_MS ? savedEvery : s.period
     s.guard = savedGuard === 'warn' ? 'warn' : 'refuse'
-    s.always = (await $.store.get(KEY_ALWAYS)) === true
+    s.always = alwaysOn(await $.store.get(KEY_ALWAYS))
     // Always means a fresh default window every session, whatever the last one left behind.
-    if (s.always) await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
+    if (s.always) await startWindow($, s, s.window, s.period)
     const usage = await $.session.usage()
     if (usage.context.tokens) s.ctx = usage.context.tokens
     await $.command.register({
       name: 'keepwarm',
-      description: 'Keep the prompt cache warm: bare for 6h, a window such as 90m, always, off, or status (cache-tax)',
-      argumentHint: '[6h | always | off | status]',
+      description: 'Keep the prompt cache warm: bare for the default window, a window such as 90m, always, off, or status (cache-tax)',
+      argumentHint: '[window | always | off | status]',
       immediate: true,
     })
     await $.command.register({
@@ -494,6 +519,22 @@ export const register: Register = on => {
     return r
   })
 
+  // The process is leaving this conversation (exit, archive, signal, /clear, resume): leave no live window behind.
+  // Fast on purpose, the whole chain shares a 1.5 s bound: no fork, only the timer and this session's two keys.
+  on('session.end', async ($, e, next) => {
+    // After a /clear the new conversation may already own the state; only the ending one's own is torn down.
+    const own = !s.sid || !e.sessionId || e.sessionId === s.sid
+    const sid = e.sessionId || s.sid
+    if (own) {
+      s.deadline = 0
+      s.every = s.period
+      outdate(s)
+      disarm(s)
+    }
+    if (sid) await Promise.all([$.store.delete(`${KEY_DEADLINE}:${sid}`), $.store.delete(`${KEY_EVERY}:${sid}`)])
+    return next(e)
+  })
+
   // Resume fields seed the guard before any turn of the resumed session has run.
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
@@ -505,7 +546,7 @@ export const register: Register = on => {
       resetForClear(s)
       s.sid = await $.session.id()
       // No session.start fires after /clear, so this is where always arms the new conversation.
-      if (s.always) await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
+      if (s.always) await startWindow($, s, s.window, s.period)
       // A window armed while this handler awaited lost its timer to resetForClear; arm it again.
       else if (s.deadline) await arm($, s)
       else updateStatus($, s, await $.clock.now())
@@ -531,19 +572,19 @@ export const register: Register = on => {
     if (words[0] === 'always') {
       s.always = true
       await $.store.set(KEY_ALWAYS, true)
-      await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
+      await startWindow($, s, s.window, s.period)
       const cold = isCold(s, now) ? `. The cache is cold now, so the first ping comes ${fmtDuration(s.every)} after the next turn` : ''
-      return { text: `keepwarm always on: every session stays warm until ${fmtDuration(DEFAULT_WINDOW_MS)} after its last turn; /keepwarm off turns it off for good${cold}` }
+      return { text: `keepwarm always on: every session stays warm until ${fmtDuration(s.window)} after its last turn; /keepwarm off turns it off for good${cold}` }
     }
     if (!words.length) {
-      await startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)
-      return { text: armedText(s, now, DEFAULT_WINDOW_MS) }
+      await startWindow($, s, s.window, s.period)
+      return { text: armedText(s, now, s.window) }
     }
     if (words[0] !== 'status') {
       const window = parseDuration(words[0])
       if (!window) return { text: 'keepwarm takes a window such as 6h or 90m, or always, off, or status' }
       // "every 2m" is a testing knob and lasts only for the window it was given with.
-      let every = PING_AFTER_MS
+      let every = s.period
       if (words[1] === 'every') {
         const period = parseDuration(words[2] ?? '')
         // A period of the cache's whole hour or more would fire only once the cache is already cold.
@@ -551,8 +592,8 @@ export const register: Register = on => {
         every = period
       }
       await startWindow($, s, window, every)
-      const rolls = s.always && (window < DEFAULT_WINDOW_MS || every !== PING_AFTER_MS)
-      return { text: armedText(s, now, window) + (rolls ? `. Always is on, so your next turn makes it at least ${fmtDuration(DEFAULT_WINDOW_MS)} at one ping per ${fmtDuration(PING_AFTER_MS)}` : '') }
+      const rolls = s.always && (window < s.window || every !== s.period)
+      return { text: armedText(s, now, window) + (rolls ? `. Always is on, so your next turn makes it at least ${fmtDuration(s.window)} at one ping per ${fmtDuration(s.period)}` : '') }
     }
     return { text: statusText(s, now) ?? 'keepwarm is off' }
   })
@@ -624,14 +665,14 @@ export const register: Register = on => {
     s.compacted = false
     s.waitForTurn = false
     s.ackedAt = 0
-    // Always covers any break up to six hours after a turn that reached the cache (a turn that failed before any
-    // response touched nothing, and its cache may be cold): a window of at least six hours at the default period,
+    // Always covers any break up to 24 hours after a turn that reached the cache (a turn that failed before any
+    // response touched nothing, and its cache may be cold): a window of at least 24 hours at the default period,
     // which brings back a stopped window and replaces a shorter one or a testing period. Another session's
     // /keepwarm off or /keepwarm always changes the shared switch, so every such turn reads it.
     if (e.usage) {
-      const shared = (await $.store.get(KEY_ALWAYS)) === true
+      const shared = alwaysOn(await $.store.get(KEY_ALWAYS))
       if (s.offs === offs) s.always = shared
-      if (s.always) await startWindow($, s, Math.max(DEFAULT_WINDOW_MS, s.deadline - now), PING_AFTER_MS, offs)
+      if (s.always) await startWindow($, s, Math.max(s.window, s.deadline - now), s.period, offs)
     }
     const u = e.usage
     if (u) {
